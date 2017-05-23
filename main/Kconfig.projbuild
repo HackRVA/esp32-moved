@@ -1,0 +1,48 @@
+menu "Wireless AP Configuration"
+
+config WIFI_SSID
+    string "WiFi SSID"
+    default "myssid"
+    help
+        SSID (network name) for the example to connect to.
+
+config WIFI_PASSWORD
+    string "WiFi Password"
+    default "mypassword"
+    help
+        WiFi password (WPA or WPA2) for the example to use.
+
+endmenu
+
+menu "Psmoveapi Moved Daemon"
+config MOVED_PORT
+    int "UDP listen port"
+    default 17777
+    help
+	UDP port to bind and listen to moved_client requests
+	
+menu "Main LED GPIO Pin-mapping"
+config GPIO_R
+    int "Red GPIO pin"
+    default 18
+    range 0 33
+    help
+	GPIO pin to use for the main RED led
+	
+config GPIO_G
+    int "Green GPIO pin"
+    default 19
+    range 0 33
+    help
+	GPIO pin to use for the main RED led
+	
+config GPIO_B
+    int "Blue GPIO pin"
+    default 20
+    range 0 33
+    help
+	GPIO pin to use for the main RED led
+    
+endmenu
+
+endmenu
