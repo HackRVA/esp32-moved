@@ -34,6 +34,15 @@
 /*! Size of buffer for holding the extension device's data as reported by the Move */
 #define PSMOVE_EXT_DATA_BUF_SIZE 5
 
+#define MOVED_REQ_COUNT_CONNECTED 0x01
+/* Request ID 0x02 is reserved / obsolete */
+#define MOVED_REQ_WRITE 0x03
+#define MOVED_REQ_READ 0x04
+#define MOVED_REQ_SERIAL 0x05
+
+#define MOVED_SIZE_REQUEST 9
+#define MOVED_SIZE_READ_RESPONSE 50
+
 
 enum PSMove_Request_Type {
     PSMove_Req_GetInput = 0x01,

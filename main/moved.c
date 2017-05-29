@@ -156,8 +156,10 @@ static void handle_moved_client_update(PSMove_Data_LEDs* leds) {
     ESP_LOGE(TAG,"Null pointer setting led and motor state");
     return;
   }
-  if(leds->type != PSMove_Req_SetLEDs) {
-    ESP_LOGE(TAG,"Recieved unsuppored update packet from moved client!");
+  //This will have to change depending on the connection mode, using the moved daemon this bit gets set to 0x03
+  //  but when using bluetooth it is set to 0x02
+  if(leds->type != MOVED_REQ_WRITE) {
+    ESP_LOGE(TAG,"Recieved unsupported update packet from moved client! got %u", leds->type);
     return;
   }
   ESP_LOGI(TAG,"Changing R Led PWM duty cycle to %i/255",leds->r);
@@ -181,7 +183,8 @@ static void moved_thread(void *p)
     listen_addr.sin_family = AF_INET;
     listen_addr.sin_port = htons(CONFIG_MOVED_PORT);
     
-    unsigned char in_buffer[52];
+    unsigned char in_buffer[MOVED_SIZE_REQUEST];
+    unsigned char response_buffer[MOVED_SIZE_READ_RESPONSE];
     
     while(1) {
       xEventGroupWaitBits(wifi_event_group,CONNECTED_BIT,
@@ -200,8 +203,54 @@ static void moved_thread(void *p)
       }
       while(1) {
 	ESP_LOGI(TAG, "Waiting for udp packet");
-	int recvlen = recvfrom(fd, in_buffer, 52, 0, (struct sockaddr *)&remote_addr, &addrlen);
-	ESP_LOGI(TAG, "Got packet!");
+	int recvlen = recvfrom(fd, in_buffer, MOVED_SIZE_REQUEST, 0, (struct sockaddr *)&remote_addr, &addrlen);
+	if (recvlen < MOVED_SIZE_REQUEST) {
+	  ESP_LOGI(TAG, "Got packet of invalid size: %i", recvlen);
+	  continue;
+	}
+	unsigned char req = in_buffer[0];
+	unsigned char device_id = in_buffer[1];
+	unsigned char* payload = &in_buffer[2];
+	int sendResponse = 0;
+	switch (req) {
+	  case MOVED_REQ_COUNT_CONNECTED:
+	    ESP_LOGI(TAG, "Got Controller count query, responding with 1");
+	    
+	    memset(response_buffer,0,MOVED_SIZE_READ_RESPONSE);
+	    
+	    //The first bit back sets the number of controllers
+	    response_buffer[0] = 1; //Let us set it to one for now
+	    sendResponse = 1;
+	    break;
+	  case MOVED_REQ_READ:
+	    //Meat and potatoes go here, actually just the sensor update packet
+	    
+	    memset(response_buffer,0,MOVED_SIZE_READ_RESPONSE);
+	    //Lets just reply with nothing for now but the response has to start with 0x1
+	    response_buffer[0] = 1;
+	    
+	    sendResponse = 1;
+	    break;
+	  case MOVED_REQ_SERIAL:
+	    //Return the unique serial number for this device.
+	    //Return all zeros for now
+	    memset(response_buffer,0,MOVED_SIZE_READ_RESPONSE);
+	    sendResponse = 1;
+	    break;
+	  case MOVED_REQ_WRITE: {
+	    //This packet updates the leds on our controller
+	    //This request does not require a reply
+	    PSMove_Data_LEDs leds;
+	    parse_moved_client_update(&in_buffer,MOVED_SIZE_REQUEST,&leds);
+	    handle_moved_client_update(&leds);
+	    sendResponse = 0;
+	    break;
+	  }
+	}
+	if(sendResponse) {
+	  sendto(fd,response_buffer,MOVED_SIZE_READ_RESPONSE,0, (struct sockaddr *)&remote_addr,addrlen);
+	}
+		
       }
       
     }
