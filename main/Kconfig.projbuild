@@ -21,24 +21,30 @@ config MOVED_PORT
     help
 	UDP port to bind and listen to moved_client requests
 	
+config BUTTON_TRIGGER_GPIO
+    int "Trigger Button GPIO"
+    default 2
+    help
+	GPIO pin used to determine trigger state
+
 menu "Main LED GPIO Pin-mapping"
 config GPIO_R
     int "Red GPIO pin"
-    default 18
+    default 15
     range 0 33
     help
 	GPIO pin to use for the main RED led
 	
 config GPIO_G
     int "Green GPIO pin"
-    default 19
+    default 16
     range 0 33
     help
 	GPIO pin to use for the main RED led
 	
 config GPIO_B
     int "Blue GPIO pin"
-    default 20
+    default 17
     range 0 33
     help
 	GPIO pin to use for the main RED led

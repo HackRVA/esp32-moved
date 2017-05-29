@@ -43,6 +43,10 @@
 
 #define LEDC_CH_NUM       (3)
 
+//Button Definitions
+#include "driver/gpio.h"
+#define BUTTON_TRIGGER_GPIO    CONFIG_BUTTON_TRIGGER_GPIO
+#define ESP_INTR_FLAG_DEFAULT 0
 
 
 /* The examples use simple WiFi configuration that you can set via
@@ -63,6 +67,7 @@ static EventGroupHandle_t wifi_event_group;
 const static int CONNECTED_BIT = BIT0;
 
 const static char *TAG = "MOVED";
+const static char *TAG_BUTTONS = "MOVED_BUTTONS";
 
 static void initilize_leds(void) {
    
@@ -115,9 +120,13 @@ static void setRGB(unsigned char r,
 		   unsigned char b) {
   //bitshift our 8 bit number to fit the counter duty cycle
   
-  uint32_t r_int = r << (LEDC_SELECTED_TIMER_BIT_DEPTH - sizeof(r));
-  uint32_t g_int = g << (LEDC_SELECTED_TIMER_BIT_DEPTH - sizeof(g));
-  uint32_t b_int = b << (LEDC_SELECTED_TIMER_BIT_DEPTH - sizeof(b));
+  uint32_t r_int = r << (LEDC_SELECTED_TIMER_BIT_DEPTH - 8);
+  uint32_t g_int = g << (LEDC_SELECTED_TIMER_BIT_DEPTH - 8);
+  uint32_t b_int = b << (LEDC_SELECTED_TIMER_BIT_DEPTH - 8);
+  
+  /*uint32_t r_int = r << 5;
+  uint32_t g_int = g << 5;
+  uint32_t b_int = b << 5;*/
   
   //TODO: Scale the shifted bits to fit maximumm and minimum possible values
   
@@ -138,14 +147,25 @@ static int serialize_moved_report_packet(PSMove_Data_Input* packet) {
 }
 
 static int parse_moved_client_update(const char* buf, size_t len, PSMove_Data_LEDs* dest) {
+  
+  
   if(len > sizeof(PSMove_Data_LEDs)) {
     ESP_LOGE(TAG, "Recieved update packet too large to populate internal buffer");
     return -1;
   }
   memset(dest,0,sizeof(PSMove_Data_Input));
   
+  dest->type = buf[2];
+  dest->_zero = 3;
+  dest->r = buf[4];
+  dest->g = buf[5];
+  dest->b = buf[6];
+  dest->rumble2 = buf[7];
+  dest->rumble = buf[8];
+  
+  
   //Let us try to populate without care for endianess
-  memcpy(dest, buf, len);
+  //memcpy(dest, buf, len);
   
   return 0;
 }
@@ -158,14 +178,53 @@ static void handle_moved_client_update(PSMove_Data_LEDs* leds) {
   }
   //This will have to change depending on the connection mode, using the moved daemon this bit gets set to 0x03
   //  but when using bluetooth it is set to 0x02
-  if(leds->type != MOVED_REQ_WRITE) {
+  if(leds->type != PSMove_Req_SetLEDs) {
     ESP_LOGE(TAG,"Recieved unsupported update packet from moved client! got %u", leds->type);
-    return;
+    //return;
   }
   ESP_LOGI(TAG,"Changing R Led PWM duty cycle to %i/255",leds->r);
   ESP_LOGI(TAG,"Changing G Led PWM duty cycle to %i/255",leds->g);
   ESP_LOGI(TAG,"Changing B Led PWM duty cycle to %i/255",leds->b);
+  setRGB(leds->r,leds->g,leds->b);
   ESP_LOGI(TAG,"Changing Vibration Motor PWM duty cycle to %i/255",leds->rumble2);
+  
+  
+}
+
+
+static xQueueHandle gpio_evt_queue = NULL;
+char latch = 0;
+
+static void IRAM_ATTR gpio_isr_handler(void* arg)
+{
+    uint32_t gpio_num = (uint32_t) arg;
+    xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
+}
+
+static void moved_init_buttons() {
+  
+  gpio_config_t io_conf;
+  
+  io_conf.intr_type = GPIO_PIN_INTR_POSEDGE;
+  //bit mask of the pins, use GPIO4/5 here
+  io_conf.pin_bit_mask = 1<<BUTTON_TRIGGER_GPIO;
+  //set as input mode    
+  io_conf.mode = GPIO_MODE_INPUT;
+  //enable pull-up mode
+  io_conf.pull_up_en = 1;
+  gpio_config(&io_conf);
+  
+  gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+
+  gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
+
+  gpio_isr_handler_add(BUTTON_TRIGGER_GPIO, gpio_isr_handler, (void*) BUTTON_TRIGGER_GPIO);
+}
+
+
+static uint16_t moved_getTriggerButton() {
+  
+  return 0;
 }
 
 
@@ -190,6 +249,8 @@ static void moved_thread(void *p)
       xEventGroupWaitBits(wifi_event_group,CONNECTED_BIT,
 			  false,true,portMAX_DELAY);
       ESP_LOGI(TAG, "Connected to AP: " CONFIG_WIFI_SSID);
+      
+      setRGB(127,127,127);
       
       fd = socket(listen_addr.sin_family,SOCK_DGRAM,0);
       if(fd < 0) {
@@ -297,6 +358,17 @@ static void wifi_conn_init(void)
     ESP_ERROR_CHECK( esp_wifi_start() );
 }
 
+static void button_thread(void *p) {
+  uint32_t io_num;
+  for(;;) {
+    if(xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
+      ESP_LOGI(TAG_BUTTONS,"MAIN BUTTON PRESSED");
+      latch = 1;
+	//printf("GPIO[%d] intr, val: %d\n", io_num, gpio_get_level(io_num));
+    }
+  }
+}
+
 void app_main(void)
 {
     ESP_ERROR_CHECK( nvs_flash_init() );
@@ -305,5 +377,9 @@ void app_main(void)
     
     initilize_leds();
     
+    
+    //moved_init_buttons();
+    
     xTaskCreate(moved_thread, "moved", 2048, NULL, 5, NULL);
+    //xTaskCreate(button_thread,"moved_buttons",2048,NULL,5,NULL);
 }
