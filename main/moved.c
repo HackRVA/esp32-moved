@@ -245,10 +245,16 @@ static void moved_thread(void *p)
     unsigned char in_buffer[MOVED_SIZE_REQUEST];
     unsigned char response_buffer[MOVED_SIZE_READ_RESPONSE];
     
+
+    uint8_t serial[6] = {0};
+    
     while(1) {
       xEventGroupWaitBits(wifi_event_group,CONNECTED_BIT,
 			  false,true,portMAX_DELAY);
       ESP_LOGI(TAG, "Connected to AP: " CONFIG_WIFI_SSID);
+      
+      //Let us the wifi mac address as our serial
+      esp_wifi_get_mac(WIFI_IF_STA,serial);
       
       setRGB(127,127,127);
       
@@ -294,8 +300,8 @@ static void moved_thread(void *p)
 	    break;
 	  case MOVED_REQ_SERIAL:
 	    //Return the unique serial number for this device.
-	    //Return all zeros for now
 	    memset(response_buffer,0,MOVED_SIZE_READ_RESPONSE);
+	    memcpy(response_buffer,serial,sizeof(serial));
 	    sendResponse = 1;
 	    break;
 	  case MOVED_REQ_WRITE: {

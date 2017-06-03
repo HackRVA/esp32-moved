@@ -5,3 +5,5 @@ include_directories(include)
 add_executable(move_coordinator
   src/main.c)
 
+set(CMAKE_BUILD_TYPE Debug)
+

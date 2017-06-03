@@ -18,6 +18,7 @@
 
 #define DEFAULT_GAME_PORT 17777
 #define DEFAULT_GAME_ADDRESS "127.0.0.1"
+#define DEFAULT_CONTROLLER_PORT 17777
 #define GAME_BUFFER_SIZE 9 /* Size of packets from the game */
 #define CONTROLLER_BUFFER_SIZE 50 /* Size of packets from the controllers */
 #define DEFAULT_CONTROLLER_FILE "/etc/jsjoust/controllers.conf"
@@ -29,6 +30,7 @@ typedef struct DirectorContext {
   int verbose;
   int game_socket;
   struct sockaddr_in game_addr;
+  struct sockaddr client_addr;
   int controller_socket;
   int num_controllers;
   struct sockaddr_in *controller_addrs;
@@ -65,7 +67,7 @@ int main(int argc, char** argv) {
   director_context_init(&ctx);
 
   /* Load the configuration */
-  while(opt_char = getopt(argc, argv, "hvg:p:c:") != -1) {
+  while((opt_char = getopt(argc, argv, "hvg:p:c:")) != -1) {
     switch(opt_char) {
     case 'h':
       printf("Move Coordinator " VERSION " -- Snapshot\n");
@@ -80,7 +82,8 @@ int main(int argc, char** argv) {
       break;
     case 'c':
       /* TODO Set the path to the controller file */
-      /* controller_file = ?; */
+      controller_file = optarg;
+      printf("Using controller file: %s\n", optarg);
       break;
     case 'g':
       /* TODO Assign the game address */
@@ -90,9 +93,13 @@ int main(int argc, char** argv) {
   }
 
   /* Load from the controller file */
-  if(director_context_load_controller_addresses(&ctx, DEFAULT_CONTROLLER_FILE)) {
+  if(director_context_load_controller_addresses(&ctx, controller_file)) {
     director_context_cleanup(&ctx);
     return 1;
+  }
+  int c;
+  for(c = 0; c < ctx.num_controllers; c++) {
+    printf("Controller %i:%s\n",c,inet_ntoa(ctx.controller_addrs[c].sin_addr));
   }
   /* Connect to the game */
   if(director_context_start_game_socket(&ctx)) {
@@ -138,6 +145,7 @@ int director_context_start_controller_socket(DirectorContext* ctx) {
     printf("Failed creating socket for controllers\n");
     return 1;
   }
+  
 
   /* onward */
   return 0;
@@ -165,14 +173,14 @@ int director_context_load_controller_addresses(DirectorContext* ctx, const char*
   size_t n;
   ssize_t nread;
   if(!(f = fopen(controller_file, "r"))) {
-    printf("Failed opening controller file\n");
+    printf("Failed opening controller file, fopen() error: %i\n",errno);
     return 1;
   }
   lineptr = NULL;
   n = 0;
   ctx->num_controllers = 0;
   ctx->controller_addrs = NULL;
-  while(nread = getline(&lineptr, &n, f) != -1) {
+  while((nread = getline(&lineptr, &n, f)) != -1) {
     if(nread == 1) /* Quits at the first empty line */
       break;
     /* Remove the newline character */
@@ -190,7 +198,7 @@ int director_context_load_controller_addresses(DirectorContext* ctx, const char*
     }
     /* Uses ephemeral ports */
     ctx->controller_addrs[controller_idx].sin_family = AF_INET;
-    ctx->controller_addrs[controller_idx].sin_port = 0;
+    ctx->controller_addrs[controller_idx].sin_port = htons(DEFAULT_CONTROLLER_PORT);
     free(lineptr);
     lineptr = NULL;
     n = 0;
@@ -211,58 +219,66 @@ int director_context_cleanup(DirectorContext* ctx) {
 }
 
 /* Things need to be fairly narrowly controlled, state-wise */
-typedef void (*CommunicationState)(
+typedef void* (*CommunicationState)(
     DirectorContext* ctx,
     char* request_buffer,
     char* response_buffer,
     void* next);
 
-static void read_from_game(
+static CommunicationState read_from_game(
     DirectorContext* ctx,
     char* request_buffer,
     char* response_buffer,
     void* next);
-static void read_from_controller(
+static CommunicationState read_from_controller(
     DirectorContext* ctx,
     char* request_buffer,
     char* response_buffer,
     void* next);
-static void write_to_game(
+static CommunicationState write_to_game(
     DirectorContext* ctx,
     char* request_buffer,
     char* response_buffer,
     void* next);
-static void write_to_controller(
+static CommunicationState write_to_controller(
     DirectorContext* ctx,
     char* request_buffer,
     char* response_buffer,
     void* next);
 
-static void read_from_game(
+static CommunicationState read_from_game(
     DirectorContext* ctx,
     char* request_buffer,
     char* response_buffer,
     void* next) {
   /* game socket is ready to read */
-  if(recvfrom(ctx->game_socket, &request_buffer, MOVED_SIZE_REQUEST, 0, NULL, NULL) == -1) {
+  
+  printf("Entering context 'read_from_game'\n");
+  socklen_t addres_size = sizeof(ctx->client_addr);
+  if(recvfrom(ctx->game_socket, request_buffer, MOVED_SIZE_REQUEST, 0, &ctx->client_addr, &addres_size) == -1) {
     printf("Error while reading from game: %s\n", strerror(errno));
-    return;
+    return read_from_game;
   }
   /* Check the game buffer for a "COUNT" request */
   unsigned char request_type = request_buffer[REQUEST_CONTROLLER_TYPE_IDX];
+
+  printf("Recieved a request packet from game of type %u: \n", request_type);
+
+  
   if(request_type == MOVED_REQ_COUNT_CONNECTED) {
     /* Service the count request yourself */
     /* Set the data read from the controller */
-    memset(&response_buffer, 0, 50);
+    memset(response_buffer, 0, 50);
     response_buffer[0] = ctx->num_controllers;
     next = write_to_game;
   } else {
     next = write_to_controller;
   }
   /* Send the request onward to the controller */
+  return next;
 }
 
-static void write_to_controller(
+static CommunicationState write_to_controller(
     DirectorContext* ctx,
     char* request_buffer,
     char* response_buffer,
@@ -270,52 +286,57 @@ static void write_to_controller(
   /* Map the controller to write to */
   struct sockaddr_in* controller_addr =
     &ctx->controller_addrs[request_buffer[REQUEST_CONTROLLER_ID_IDX]];
-
+    
+   printf("Entering context 'write_to_controller' to controller %u\n",request_buffer[REQUEST_CONTROLLER_ID_IDX]);
+  
   /* Write the request buffer onward */
   sendto(
     ctx->controller_socket,
-    &request_buffer,
+    request_buffer,
     MOVED_SIZE_REQUEST,
     0,
     (struct sockaddr*) controller_addr,
-    sizeof(controller_addr));
+    sizeof(struct sockaddr));
 
   switch(request_buffer[REQUEST_CONTROLLER_TYPE_IDX]) {
   case MOVED_REQ_COUNT_CONNECTED: /* Technically shouldn't happen */
     printf("Something bad happened, requested count from controller!\n");
+  case MOVED_REQ_SERIAL:
   case MOVED_REQ_READ:
     /* Listen for a response */
     next = (void*) read_from_controller;
     break;
   default:
   case MOVED_REQ_WRITE:
-  case MOVED_REQ_SERIAL:
-    /* No response expected,  */
     next = (void*) read_from_game;
     break;
   }
+  return next;
 }
 
-static void write_to_game(
+static CommunicationState write_to_game(
     DirectorContext* ctx,
     char* request_buffer,
     char* response_buffer,
     void* next) {
+  printf("Entering context 'write_to_game'\n");
   sendto(
     ctx->game_socket,
     response_buffer,
     MOVED_SIZE_READ_RESPONSE,
     0,
-    (struct sockaddr*) &ctx->game_addr,
-    sizeof(ctx->game_addr));
+    (struct sockaddr*) &ctx->client_addr,
+    sizeof(ctx->client_addr));
   next = (void*) read_from_game;
+  return next;
 }
 
-static void read_from_controller(
+static CommunicationState read_from_controller(
     DirectorContext* ctx,
     char* request_buffer,
     char* response_buffer,
     void* next) {
+  printf("Entering context 'read_from_controller'\n");
   recvfrom(
     ctx->controller_socket,
     response_buffer,
@@ -325,6 +346,7 @@ static void read_from_controller(
     NULL);
   /* Should pass data on without changes */
   next = (void*) write_to_game;
+  return next;
 }
 
 int director_context_run(DirectorContext* ctx) {
@@ -338,7 +360,8 @@ int director_context_run(DirectorContext* ctx) {
   state = read_from_game;
   /* Things need to be fairly narrowly controlled, state-wise */
   while(!interrupted) {
-    state(ctx, request_buffer, response_buffer, (void*) &state);
+    
+    state = state(ctx, request_buffer, response_buffer, (void*) &state);
   }
   /* Successfully exits */
   return 0;
