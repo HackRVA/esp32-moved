@@ -1,0 +1,4 @@
+[submodule "pcb/ESP32-kiCAD-Footprints"]
+	path = pcb/ESP32-kiCAD-Footprints
+	url = https://github.com/adamjvr/ESP32-kiCAD-Footprints.git
+	branch = master

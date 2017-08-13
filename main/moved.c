@@ -18,9 +18,13 @@
 #include "esp_wifi.h"
 #include "esp_event_loop.h"
 
+#include "driver/i2c.h"
+
 #include "nvs_flash.h"
 
 #include "lwip/sockets.h"
+
+
 
 #include "psmove_protocol.h"
 
@@ -43,9 +47,27 @@
 
 #define LEDC_CH_NUM       (3)
 
+
+//I2C definitions
+#define I2C_EXAMPLE_MASTER_SCL_IO    CONFIG_I2C_MASTER_SCL_PIN    /*!< gpio number for I2C master clock */
+#define I2C_EXAMPLE_MASTER_SDA_IO    CONFIG_I2C_MASTER_SDA_PIN    /*!< gpio number for I2C master data  */
+#define I2C_EXAMPLE_MASTER_NUM I2C_NUM_1   /*!< I2C port number for master dev */
+#define I2C_EXAMPLE_MASTER_TX_BUF_DISABLE   0   /*!< I2C master do not need buffer */
+#define I2C_EXAMPLE_MASTER_RX_BUF_DISABLE   0   /*!< I2C master do not need buffer */
+#define I2C_EXAMPLE_MASTER_FREQ_HZ 100000 /*!< I2C master clock frequency */
+#define I2C_ACCEL_ADDR CONFIG_I2C_ACCEL_ADR
+
+#ifdef CONFIG_I2C_MASTER_PULLUP
+#define I2C_EXAMPLE_ENABLE_PULLUP GPIO_PULLUP_ENABLE
+#else
+#define I2C_EXAMPLE_ENABLE_PULLUP GPIO_PULLUP_DISABLE
+#endif
+
+
 //Button Definitions
 #include "driver/gpio.h"
 #define BUTTON_TRIGGER_GPIO    CONFIG_BUTTON_TRIGGER_GPIO
+#define BUTTON_NORMALLY_OPEN   CONFIG_BUTTON_NORMALLY_OPEN
 #define ESP_INTR_FLAG_DEFAULT 0
 
 
@@ -68,6 +90,19 @@ const static int CONNECTED_BIT = BIT0;
 
 const static char *TAG = "MOVED";
 const static char *TAG_BUTTONS = "MOVED_BUTTONS";
+const static char *TAG_ACCEL = "MOVED_ACCEL";
+
+
+// Lets create a race condition \O/
+uint8_t accel_x_h =0;
+uint8_t accel_x_l =0;
+uint8_t accel_y_h =0;
+uint8_t accel_y_l =0;
+uint8_t accel_z_h =0;
+uint8_t accel_z_l =0;
+
+uint8_t sequence_num=0;
+
 
 static void initilize_leds(void) {
    
@@ -214,6 +249,8 @@ static void moved_init_buttons() {
   io_conf.pull_up_en = 1;
   gpio_config(&io_conf);
   
+  
+  
   gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
 
   gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
@@ -246,7 +283,7 @@ static void moved_thread(void *p)
     unsigned char response_buffer[MOVED_SIZE_READ_RESPONSE];
     
 
-    uint8_t serial[6] = {0};
+    uint8_t serial[6] = {1};
     
     while(1) {
       xEventGroupWaitBits(wifi_event_group,CONNECTED_BIT,
@@ -254,7 +291,7 @@ static void moved_thread(void *p)
       ESP_LOGI(TAG, "Connected to AP: " CONFIG_WIFI_SSID);
       
       //Let us the wifi mac address as our serial
-      esp_wifi_get_mac(WIFI_IF_STA,serial);
+      //esp_wifi_get_mac(WIFI_IF_STA,serial);
       
       setRGB(127,127,127);
       
@@ -269,7 +306,7 @@ static void moved_thread(void *p)
 	continue;
       }
       while(1) {
-	ESP_LOGI(TAG, "Waiting for udp packet");
+	//ESP_LOGI(TAG, "Waiting for udp packet");
 	int recvlen = recvfrom(fd, in_buffer, MOVED_SIZE_REQUEST, 0, (struct sockaddr *)&remote_addr, &addrlen);
 	if (recvlen < MOVED_SIZE_REQUEST) {
 	  ESP_LOGI(TAG, "Got packet of invalid size: %i", recvlen);
@@ -294,7 +331,56 @@ static void moved_thread(void *p)
 	    
 	    memset(response_buffer,0,MOVED_SIZE_READ_RESPONSE);
 	    //Lets just reply with nothing for now but the response has to start with 0x1
-	    response_buffer[0] = 1;
+	    
+	    int offset = 0x01;
+	    
+	    response_buffer[0x04 + offset] = 0x7F & (sequence_num);
+	    sequence_num += 1;
+	    if(sequence_num > 0x0f) {
+	      sequence_num = 0;
+	    }
+	    
+	    response_buffer[0] = sequence_num;
+	    
+	    
+	    response_buffer[offset] = 1;
+	    
+	    response_buffer[0x0D + offset] = accel_x_l;
+	    response_buffer[0x0e + offset] = accel_x_h;
+	    response_buffer[0x0f + offset] = accel_z_l;
+	    response_buffer[0x10 + offset] = accel_z_h;
+	    response_buffer[0x11 + offset] = accel_y_l;
+	    response_buffer[0x12 + offset] = accel_y_h;
+	    
+	    //Copy
+	    response_buffer[0x13 + offset] = accel_x_l;
+	    response_buffer[0x14 + offset] = accel_x_h;
+	    response_buffer[0x15 + offset] = accel_z_l;
+	    response_buffer[0x16 + offset] = accel_z_h;
+	    response_buffer[0x17 + offset] = accel_y_l;
+	    response_buffer[0x18 + offset] = accel_y_h;
+	    
+	    response_buffer[0x07 + offset] = 0x7F;
+	    response_buffer[0x08 + offset] = 0x7F;
+	    response_buffer[0x09 + offset] = 0x7F;
+	    response_buffer[0x0a + offset] = 0x7F;
+	    
+	    
+	    int pressed = gpio_get_level(BUTTON_TRIGGER_GPIO);
+#ifdef BUTTON_NORMALLY_OPEN
+	    if(!pressed) {
+#else
+	    if(pressed) {
+#endif
+	      
+	      ESP_LOGI(TAG,"Trigger is pressed!");
+	      response_buffer[0x02 + offset] = 0x40;
+	      response_buffer[0x03 + offset] = 0x10;
+	      response_buffer[0x04 + offset] |= 0x80;
+	      response_buffer[0x05 + offset] = 0x00;
+	      response_buffer[0x06 + offset] = 0xff;
+	    }
+	    
 	    
 	    sendResponse = 1;
 	    break;
@@ -315,7 +401,7 @@ static void moved_thread(void *p)
 	  }
 	}
 	if(sendResponse) {
-	  sendto(fd,response_buffer,MOVED_SIZE_READ_RESPONSE,0, (struct sockaddr *)&remote_addr,addrlen);
+	  size_t sent = sendto(fd,response_buffer,MOVED_SIZE_READ_RESPONSE,0, (struct sockaddr *)&remote_addr,addrlen);
 	}
 		
       }
@@ -375,6 +461,80 @@ static void button_thread(void *p) {
   }
 }
 
+/**
+ * @brief i2c master initialization
+ */
+static void i2c_example_master_init()
+{
+    int i2c_master_port = I2C_EXAMPLE_MASTER_NUM;
+    i2c_config_t conf;
+    conf.mode = I2C_MODE_MASTER;
+    conf.sda_io_num = I2C_EXAMPLE_MASTER_SDA_IO;
+    conf.sda_pullup_en = I2C_EXAMPLE_ENABLE_PULLUP;
+    conf.scl_io_num = I2C_EXAMPLE_MASTER_SCL_IO;
+    conf.scl_pullup_en = I2C_EXAMPLE_ENABLE_PULLUP;
+    conf.master.clk_speed = I2C_EXAMPLE_MASTER_FREQ_HZ;
+    i2c_param_config(i2c_master_port, &conf);
+    i2c_driver_install(i2c_master_port, conf.mode,
+                       I2C_EXAMPLE_MASTER_RX_BUF_DISABLE,
+                       I2C_EXAMPLE_MASTER_TX_BUF_DISABLE, 0);
+}
+
+static void i2c_test_task(void* arg) {
+  i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+  i2c_master_start(cmd);
+  i2c_master_write_byte(cmd,I2C_ACCEL_ADDR << 1 | I2C_MASTER_WRITE,1);
+  i2c_master_write_byte(cmd,0x6b,1);
+  i2c_master_write_byte(cmd,0,1); //wake up the unit
+  i2c_master_stop(cmd);
+  int ret = i2c_master_cmd_begin(I2C_EXAMPLE_MASTER_NUM, cmd, 1000 / portTICK_RATE_MS);
+  i2c_cmd_link_delete(cmd);
+  
+  if(ret == ESP_FAIL) {
+    ESP_LOGE(TAG_ACCEL,"Unable to wakeup MPU6050");
+    return;
+  }
+  vTaskDelay(300 / portTICK_RATE_MS);
+  
+  while(1) {
+    cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd,I2C_ACCEL_ADDR << 1 | I2C_MASTER_WRITE,1);
+    i2c_master_write_byte(cmd,0x3B,1);
+    i2c_master_start(cmd);
+
+    accel_x_h =0;
+    accel_x_l =0;
+    accel_y_h =0;
+    accel_y_l =0;
+    accel_z_h =0;
+    accel_z_l =0;
+    
+    
+    i2c_master_write_byte(cmd,I2C_ACCEL_ADDR << 1 | I2C_MASTER_READ,1);
+    i2c_master_read_byte(cmd,&accel_x_h,0);
+    i2c_master_read_byte(cmd,&accel_x_l,0);
+    i2c_master_read_byte(cmd,&accel_y_h,0);
+    i2c_master_read_byte(cmd,&accel_y_l,0);
+    i2c_master_read_byte(cmd,&accel_z_h,0);
+    i2c_master_read_byte(cmd,&accel_z_l,1);
+    i2c_master_stop(cmd);
+    int ret = i2c_master_cmd_begin(I2C_EXAMPLE_MASTER_NUM, cmd, 1000 / portTICK_RATE_MS);
+    i2c_cmd_link_delete(cmd);
+    if(ret == ESP_FAIL) {
+      ESP_LOGE(TAG_ACCEL,"Unable to read values from MPU6050");
+    }
+    int16_t accel_x = accel_x_h << 8 | accel_x_l;
+    int16_t accel_y = accel_y_h << 8 | accel_y_l;
+    int16_t accel_z = accel_z_h << 8 | accel_z_l;
+    
+    ESP_LOGI(TAG_ACCEL, "X: %i Y: %i, Z: %i", accel_x,accel_y,accel_z);
+    
+    vTaskDelay( 30 / portTICK_RATE_MS);
+  }
+}
+
+
 void app_main(void)
 {
     ESP_ERROR_CHECK( nvs_flash_init() );
@@ -383,9 +543,11 @@ void app_main(void)
     
     initilize_leds();
     
+    i2c_example_master_init();
     
-    //moved_init_buttons();
+    moved_init_buttons();
     
     xTaskCreate(moved_thread, "moved", 2048, NULL, 5, NULL);
+    xTaskCreate(i2c_test_task, "moved_accel", 2048, NULL, 5, NULL);
     //xTaskCreate(button_thread,"moved_buttons",2048,NULL,5,NULL);
 }
